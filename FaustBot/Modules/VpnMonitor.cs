@@ -1,27 +1,24 @@
-﻿using Discord;
+// Nullable is disabled here until this module is replaced by VpnMonitorService.
+#nullable disable
+using Discord;
 using Discord.Interactions;
-using Microsoft.Extensions.Configuration;
+using FaustBot.Options;
+using Microsoft.Extensions.Options;
 using SoftEther.VPNServerRpc;
 using System.Globalization;
 using System.Text;
 using System.Timers;
 
-namespace FaustBot.Services
+namespace FaustBot.Modules
 {
     public class VpnMonitor : InteractionModuleBase<SocketInteractionContext>
     {
-        public InteractionService Commands { get; set; }
-        private CommandHandler _handler;
-
         private static System.Timers.Timer countdownTimer;
 
-        //VpnServerRpc api;
-        //string hubName;
-        IConfigurationSection hubListConfig;
-        IConfigurationSection ignoreListConfig;
         string serverIp;
+        int serverPort;
         string serverPassword;
-        List<Hub> hubList = new List<Hub>();
+        List<Hub> hubList;
         List<Hub> prevHubList = new List<Hub>();
         ulong guildId;
         ulong logChannelId;
@@ -29,7 +26,7 @@ namespace FaustBot.Services
         bool enableLogs;
         ulong embedChannelId;
         bool virtualHubMode;
-        List<string> ignoreList = new List<string>();
+        List<string> ignoreList;
         string terminalName;
         string selectedTimeZone;
         bool displaySessionTime;
@@ -40,61 +37,30 @@ namespace FaustBot.Services
         string hubOnlineEmoji;
         string hubOfflineEmoji;
 
-        //private static Dictionary<string, UserSessionInfo> _currentUsernames = new Dictionary<string, UserSessionInfo>();
-
-        public VpnMonitor(CommandHandler handler, IServiceProvider services, IConfiguration config)
+        public VpnMonitor(IOptions<BotOptions> options)
         {
-            _handler = handler;
-            serverIp = config["VpnServerIp"];
-            if (!virtualHubMode)
-            {
-                serverPassword = config["VpnServerPassword"];
-            }
-            //hubName = config["VpnHubName"];
-            hubListConfig = config.GetSection("VpnHubList");
-            virtualHubMode = bool.Parse(config["VirtualHubMode"]);
-            for (int i = 0; i < hubListConfig.GetChildren().Count(); i++)
-            {
-                string hubName = config[$"VpnHubList:{i}"];
-                if (virtualHubMode)
-                {
-                    string hubPassword = config[$"VpnHubPasswords:{i}"];
-                    hubList.Add(new Hub(hubName, hubPassword));
-                }
-                else
-                {
-                    hubList.Add(new Hub(hubName));
-                }
-            }
-            //prevHubList = hubList;
-            guildId = ulong.Parse(config["GuildId"]);
-            logChannelId = ulong.Parse(config["LogChannelId"]);
-            embedChannelId = ulong.Parse(config["EmbedChannelId"]);
-            delay = int.Parse(config["UpdateDelay"]) * 1000;
-            enableLogs = bool.Parse(config["EnableLogs"]);
-            ignoreListConfig = config.GetSection("IgnoreList");
-            for (int i = 0; i < ignoreListConfig.GetChildren().Count(); i++)
-            {
-                string ignoreItem = config[$"IgnoreList:{i}"];
-                ignoreList.Add(ignoreItem);
-            }
-
-            terminalName = config["TerminalName"];
-            selectedTimeZone = config["TimeZone"];
-            displaySessionTime = bool.Parse(config["DisplaySessionTime"]);
-            titleText = config["TitleText"];
-            footerText = config["FooterText"];
-            mentionUserIds = bool.Parse(config["MentionUserIds"]);
-            useCustomEmojis = bool.Parse(config["CustomEmojis"]);
-            if (useCustomEmojis)
-            {
-                hubOnlineEmoji = config["HubOnlineEmoji"];
-                hubOfflineEmoji = config["HubOfflineEmoji"];
-            }
-
-            //api = new VpnServerRpc(serverIp, 443, serverPassword, "");
+            var config = options.Value;
+            serverIp = config.VpnServerIp;
+            serverPort = config.VpnServerPort;
+            serverPassword = config.VpnServerPassword;
+            virtualHubMode = config.VirtualHubMode;
+            hubList = config.Hubs.Select(h => new Hub(h.Name, h.Password ?? "")).ToList();
+            guildId = config.GuildId;
+            logChannelId = config.LogChannelId;
+            embedChannelId = config.EmbedChannelId;
+            delay = config.UpdateDelay * 1000;
+            enableLogs = config.EnableLogs;
+            ignoreList = config.IgnoreList;
+            terminalName = config.TerminalName;
+            selectedTimeZone = config.TimeZone;
+            displaySessionTime = config.DisplaySessionTime;
+            titleText = config.TitleText;
+            footerText = config.FooterText;
+            mentionUserIds = config.MentionUserIds;
+            useCustomEmojis = config.CustomEmojis;
+            hubOnlineEmoji = config.HubOnlineEmoji;
+            hubOfflineEmoji = config.HubOfflineEmoji;
         }
-
 
         [RequireOwner]
         [SlashCommand("start", "Start VPN monitoring service.")]
@@ -246,7 +212,6 @@ namespace FaustBot.Services
             }
         }
 
-
         public async Task CheckForUserChanges()
         {
             Console.WriteLine("Checking for user changes...");
@@ -323,15 +288,10 @@ namespace FaustBot.Services
             await Task.WhenAll(tasks);
         }
 
-
-
         public async Task UpdateEmbed()
         {
-            //List<Hub> hubList = new List<Hub>();
-
             var embed = new EmbedBuilder
             {
-                // Embed property can be set within object initializer
                 Title = titleText,
             };
 
@@ -406,17 +366,6 @@ namespace FaustBot.Services
                 embed.AddField(fieldName.ToString(), userList.ToString());
             }
 
-            // Or with methods
-            //embed.AddField("Field title",
-            //    "Field value. I also support [hyperlink markdown](https://example.com)!")
-            //    .WithAuthor(Context.Client.CurrentUser)
-            //    .WithFooter(footer => footer.Text = "I am a footer.")
-            //    .WithColor(Color.Blue)
-            //    .WithTitle("I overwrote \"Hello world!\"")
-            //    .WithDescription("I am a description.")
-            //    .WithUrl("https://example.com")
-            //    .WithCurrentTimestamp();
-
             embed.WithColor(Color.Green);
             embed.WithCurrentTimestamp();
             embed.WithFooter(footer => footer.Text = footerText);
@@ -431,7 +380,6 @@ namespace FaustBot.Services
             var messageToDelete = await Context.Client.GetGuild(guildId).GetTextChannel(embedChannelId).GetMessagesAsync(limit: 1).FlattenAsync();
             await Context.Client.GetGuild(guildId).GetTextChannel(embedChannelId).DeleteMessagesAsync(messageToDelete);
         }
-
 
         private void SetTimer()
         {
@@ -453,12 +401,6 @@ namespace FaustBot.Services
 
         private async void OnTimedEvent(object source, ElapsedEventArgs e)
         {
-            //VpnRpcEnumSession in_rpc_enum_session = new VpnRpcEnumSession()
-            //{
-            //    HubName_str = hubName,
-            //};
-            //VpnRpcEnumSession out_rpc_enum_session = api.EnumSession(in_rpc_enum_session);
-
             try
             {
                 UpdateHubList();
@@ -479,8 +421,6 @@ namespace FaustBot.Services
 
         public VpnRpcEnumSession Get_EnumSession(Hub hub)
         {
-            //Console.WriteLine("Begin: Test_EnumSession");
-
             VpnRpcEnumSession in_rpc_enum_session = new VpnRpcEnumSession()
             {
                 HubName_str = hub.HubName,
@@ -488,19 +428,11 @@ namespace FaustBot.Services
             VpnServerRpc api = GetApi(hub);
             VpnRpcEnumSession out_rpc_enum_session = api.EnumSession(in_rpc_enum_session);
 
-            //print_object(out_rpc_enum_session);
-
-            //Console.WriteLine("End: Test_EnumSession");
-            //Console.WriteLine("-----");
-            //Console.WriteLine();
-
             return out_rpc_enum_session;
         }
 
         public VpnRpcHubStatus Test_GetHubStatus(Hub hub)
         {
-            //Console.WriteLine("Begin: Test_GetHubStatus");
-
             VpnRpcHubStatus in_rpc_hub_status = new VpnRpcHubStatus()
             {
                 HubName_str = hub.HubName,
@@ -508,11 +440,7 @@ namespace FaustBot.Services
             VpnServerRpc api = GetApi(hub);
             VpnRpcHubStatus out_rpc_hub_status = api.GetHubStatus(in_rpc_hub_status);
 
-            return(out_rpc_hub_status);
-
-            //Console.WriteLine("End: Test_GetHubStatus");
-            //Console.WriteLine("-----");
-            //Console.WriteLine();
+            return out_rpc_hub_status;
         }
 
         public VpnServerRpc GetApi(Hub hub)
@@ -520,24 +448,13 @@ namespace FaustBot.Services
             VpnServerRpc api;
             if (virtualHubMode)
             {
-                api = new VpnServerRpc(serverIp, 443, hub.HubPassword, hub.HubName);
+                api = new VpnServerRpc(serverIp, serverPort, hub.HubPassword, hub.HubName);
             }
             else
             {
-                api = new VpnServerRpc(serverIp, 443, serverPassword, "");
+                api = new VpnServerRpc(serverIp, serverPort, serverPassword, "");
             }
             return api;
-        }
-
-        public void print_object(object obj)
-        {
-            var setting = new Newtonsoft.Json.JsonSerializerSettings()
-            {
-                NullValueHandling = Newtonsoft.Json.NullValueHandling.Include,
-                ReferenceLoopHandling = Newtonsoft.Json.ReferenceLoopHandling.Error,
-            };
-            string str = Newtonsoft.Json.JsonConvert.SerializeObject(obj, Newtonsoft.Json.Formatting.Indented, setting);
-            Console.WriteLine(str);
         }
     }
 

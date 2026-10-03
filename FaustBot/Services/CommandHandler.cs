@@ -1,143 +1,79 @@
 using Discord;
 using Discord.Interactions;
 using Discord.WebSocket;
-using System.Reflection;
+using FaustBot.Options;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
+namespace FaustBot.Services;
 
-namespace FaustBot.Services
+/// <summary>Routes incoming interactions to the command modules and reports failed commands to the user.</summary>
+public sealed class CommandHandler(
+    DiscordSocketClient client,
+    InteractionService interactions,
+    IServiceProvider services,
+    IOptions<BotOptions> options,
+    ILogger<CommandHandler> logger)
 {
-    public class CommandHandler
+    public async Task InitializeAsync()
     {
-        private readonly DiscordSocketClient _client;
-        private readonly InteractionService _commands;
-        private readonly IServiceProvider _services;
+        await interactions.AddModulesAsync(typeof(CommandHandler).Assembly, services);
 
-        public CommandHandler(DiscordSocketClient client, InteractionService commands, IServiceProvider services)
+        client.InteractionCreated += HandleInteractionAsync;
+        interactions.InteractionExecuted += OnInteractionExecutedAsync;
+    }
+
+    private async Task HandleInteractionAsync(SocketInteraction interaction)
+    {
+        // The token is shared with programs that serve other guilds. Their interactions reach this
+        // gateway connection too, and must be left alone so the program that owns them can reply.
+        if (interaction.GuildId != options.Value.GuildId)
         {
-            _client = client;
-            _commands = commands;
-            _services = services;
+            return;
         }
 
-        public async Task InitializeAsync()
+        var context = new SocketInteractionContext(client, interaction);
+        await interactions.ExecuteCommandAsync(context, services);
+    }
+
+    private async Task OnInteractionExecutedAsync(ICommandInfo command, IInteractionContext context, IResult result)
+    {
+        // UnknownCommand: not one of ours, so stay silent.
+        if (result.IsSuccess || result.Error == InteractionCommandError.UnknownCommand)
         {
-            // add the public modules that inherit InteractionModuleBase<T> to the InteractionService
-            await _commands.AddModulesAsync(Assembly.GetEntryAssembly(), _services);
-
-            // process the InteractionCreated payloads to execute Interactions commands
-            _client.InteractionCreated += HandleInteraction;
-
-            // process the command execution results 
-            _commands.SlashCommandExecuted += SlashCommandExecuted;
-            _commands.ContextCommandExecuted += ContextCommandExecuted;
-            _commands.ComponentCommandExecuted += ComponentCommandExecuted;
+            return;
         }
 
-        private Task ComponentCommandExecuted(ComponentCommandInfo arg1, Discord.IInteractionContext arg2, IResult arg3)
+        // Exceptions are already logged by InteractionService through its Log event.
+        if (result.Error != InteractionCommandError.Exception)
         {
-            if (!arg3.IsSuccess)
-            {
-                switch (arg3.Error)
-                {
-                    case InteractionCommandError.UnmetPrecondition:
-                        // implement
-                        break;
-                    case InteractionCommandError.UnknownCommand:
-                        // implement
-                        break;
-                    case InteractionCommandError.BadArgs:
-                        // implement
-                        break;
-                    case InteractionCommandError.Exception:
-                        // implement
-                        break;
-                    case InteractionCommandError.Unsuccessful:
-                        // implement
-                        break;
-                    default:
-                        break;
-                }
-            }
-
-            return Task.CompletedTask;
+            logger.LogWarning("Command {Command} failed for {User}: {Error} {Reason}",
+                command?.Name, context.User.Username, result.Error, result.ErrorReason);
         }
 
-        private Task ContextCommandExecuted(ContextCommandInfo arg1, Discord.IInteractionContext arg2, IResult arg3)
+        var message = result.Error switch
         {
-            if (!arg3.IsSuccess)
-            {
-                switch (arg3.Error)
-                {
-                    case InteractionCommandError.UnmetPrecondition:
-                        // implement
-                        break;
-                    case InteractionCommandError.UnknownCommand:
-                        // implement
-                        break;
-                    case InteractionCommandError.BadArgs:
-                        // implement
-                        break;
-                    case InteractionCommandError.Exception:
-                        // implement
-                        break;
-                    case InteractionCommandError.Unsuccessful:
-                        // implement
-                        break;
-                    default:
-                        break;
-                }
-            }
+            InteractionCommandError.UnmetPrecondition => result.ErrorReason,
+            InteractionCommandError.BadArgs or InteractionCommandError.ConvertFailed or InteractionCommandError.ParseFailed
+                => "Invalid command arguments.",
+            _ => "Something went wrong running that command. Check the bot logs for details.",
+        };
 
-            return Task.CompletedTask;
+        try
+        {
+            if (context.Interaction.HasResponded)
+            {
+                await context.Interaction.FollowupAsync(message, ephemeral: true);
+            }
+            else
+            {
+                await context.Interaction.RespondAsync(message, ephemeral: true);
+            }
         }
-
-        private Task SlashCommandExecuted(SlashCommandInfo arg1, Discord.IInteractionContext arg2, IResult arg3)
+        catch (Exception ex) when (ex is Discord.Net.HttpException or TimeoutException)
         {
-            if (!arg3.IsSuccess)
-            {
-                switch (arg3.Error)
-                {
-                    case InteractionCommandError.UnmetPrecondition:
-                        // implement
-                        break;
-                    case InteractionCommandError.UnknownCommand:
-                        // implement
-                        break;
-                    case InteractionCommandError.BadArgs:
-                        // implement
-                        break;
-                    case InteractionCommandError.Exception:
-                        // implement
-                        break;
-                    case InteractionCommandError.Unsuccessful:
-                        // implement
-                        break;
-                    default:
-                        break;
-                }
-            }
-
-            return Task.CompletedTask;
-        }
-
-        private async Task HandleInteraction(SocketInteraction arg)
-        {
-            try
-            {
-                // create an execution context that matches the generic type parameter of your InteractionModuleBase<T> modules
-                var ctx = new SocketInteractionContext(_client, arg);
-                await _commands.ExecuteCommandAsync(ctx, _services);
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine(ex);
-                // if a Slash Command execution fails it is most likely that the original interaction acknowledgement will persist. It is a good idea to delete the original
-                // response, or at least let the user know that something went wrong during the command execution.
-                if (arg.Type == InteractionType.ApplicationCommand)
-                {
-                    await arg.GetOriginalResponseAsync().ContinueWith(async (msg) => await msg.Result.DeleteAsync());
-                }
-            }
+            // The interaction may have expired (3s to respond, 15 min for follow-ups).
+            logger.LogWarning(ex, "Could not send the error message for {Command}.", command?.Name);
         }
     }
 }
