@@ -361,3 +361,7 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+# FaustBot
+config.json
+state.json
+!FaustBot/Properties/PublishProfiles/linux-x64.pubxml
