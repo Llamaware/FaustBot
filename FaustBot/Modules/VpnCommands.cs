@@ -14,19 +14,32 @@ public sealed class VpnCommands(VpnMonitorService monitor, VpnServerClient vpn) 
     [SlashCommand("start", "Start VPN monitoring.")]
     public async Task Start()
     {
-        var started = await monitor.StartMonitoringAsync();
-        await RespondAsync(started ? "VPN monitoring started." : "VPN monitoring is already running.", ephemeral: true);
+        // Public replies, so the channel shows who started or stopped monitoring and when.
+        if (await monitor.StartMonitoringAsync(Context.User))
+        {
+            await RespondAsync("VPN monitoring started.");
+        }
+        else
+        {
+            await RespondAsync("VPN monitoring is already running.", ephemeral: true);
+        }
     }
 
     [RequireBotAdmin]
     [SlashCommand("stop", "Pause VPN monitoring until it's started again.")]
     public async Task Stop()
     {
+        if (!monitor.IsRunning)
+        {
+            await RespondAsync("VPN monitoring isn't running.", ephemeral: true);
+            return;
+        }
+
         // Stopping waits for an in-progress update and edits the embed, which can take longer than
         // the 3 seconds Discord allows for a response.
-        await DeferAsync(ephemeral: true);
-        var stopped = await monitor.StopMonitoringAsync();
-        await FollowupAsync(stopped ? "VPN monitoring paused." : "VPN monitoring isn't running.", ephemeral: true);
+        await DeferAsync();
+        var stopped = await monitor.StopMonitoringAsync(Context.User);
+        await FollowupAsync(stopped ? "VPN monitoring paused." : "VPN monitoring isn't running.");
     }
 
     [SlashCommand("status", "Show whether hubs are online.")]

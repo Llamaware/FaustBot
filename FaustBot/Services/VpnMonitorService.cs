@@ -23,7 +23,6 @@ public sealed class VpnMonitorService(
     ILogger<VpnMonitorService> logger) : IHostedService
 {
     private const string TimeFormat = "dddd, MMMM dd, h:mm:ss tt";
-    private const string PausedNotice = "⏸️ VPN monitoring is paused. Use `/vpn start` to resume.";
     private const string OfflineNotice = "🔴 The bot is offline. This message will update when it's back.";
 
     // How far back to look for an embed to reuse when state.json doesn't have one.
@@ -35,6 +34,10 @@ public sealed class VpnMonitorService(
     private CancellationTokenSource? _loopCts;
     private Task? _loopTask;
     private bool _autoStartHandled;
+    private IDisposable? _optionsSubscription;
+
+    // Released to cut the wait between updates short, e.g. after /bot reload.
+    private readonly SemaphoreSlim _refreshSignal = new(0, 1);
 
     // Last snapshot of each hub that answered, for join/leave logs.
     private readonly Dictionary<string, HubSnapshot> _lastKnownHubs = new(StringComparer.OrdinalIgnoreCase);
@@ -44,7 +47,8 @@ public sealed class VpnMonitorService(
     public bool IsRunning => _loopTask is { IsCompleted: false };
 
     /// <summary>Starts monitoring. Returns false if it was already running.</summary>
-    public async Task<bool> StartMonitoringAsync()
+    /// <param name="startedBy">Who ran the start command, or null when starting automatically.</param>
+    public async Task<bool> StartMonitoringAsync(IUser? startedBy = null)
     {
         await _stateLock.WaitAsync();
         try
@@ -54,7 +58,15 @@ public sealed class VpnMonitorService(
                 return false;
             }
 
-            logger.LogInformation("Starting VPN monitoring service.");
+            if (startedBy is null)
+            {
+                logger.LogInformation("VPN monitoring started automatically.");
+            }
+            else
+            {
+                logger.LogInformation("VPN monitoring started by {User} ({UserId}).", startedBy.Username, startedBy.Id);
+            }
+
             await SetPausedAsync(false);
             _lastKnownHubs.Clear();
             _loopCts = new CancellationTokenSource();
@@ -69,7 +81,7 @@ public sealed class VpnMonitorService(
 
     /// <summary>Stops monitoring until started again, including across restarts, and marks the embed as paused.
     /// Returns false if it wasn't running.</summary>
-    public async Task<bool> StopMonitoringAsync()
+    public async Task<bool> StopMonitoringAsync(IUser stoppedBy)
     {
         await _stateLock.WaitAsync();
         try
@@ -80,7 +92,10 @@ public sealed class VpnMonitorService(
             }
 
             await SetPausedAsync(true);
-            await TryPublishNoticeAsync(PausedNotice);
+            logger.LogInformation("VPN monitoring paused by {User} ({UserId}).", stoppedBy.Username, stoppedBy.Id);
+
+            // The embed is public, so it only says monitoring is paused; its timestamp shows when.
+            await TryPublishNoticeAsync("⏸️ VPN monitoring is paused.");
             return true;
         }
         finally
@@ -97,11 +112,15 @@ public sealed class VpnMonitorService(
     public Task StartAsync(CancellationToken cancellationToken)
     {
         client.Ready += OnReadyAsync;
+
+        // Show a reloaded config.json straight away instead of after the next UpdateDelay.
+        _optionsSubscription = options.OnChange(_ => RequestRefresh());
         return Task.CompletedTask;
     }
 
     public async Task StopAsync(CancellationToken cancellationToken)
     {
+        _optionsSubscription?.Dispose();
         await _stateLock.WaitAsync(cancellationToken);
         try
         {
@@ -166,7 +185,7 @@ public sealed class VpnMonitorService(
             return false;
         }
 
-        logger.LogInformation("Stopping VPN monitoring service.");
+        logger.LogDebug("Stopping the monitoring loop.");
         await _loopCts.CancelAsync();
         await _loopTask;
         _loopCts.Dispose();
@@ -180,22 +199,42 @@ public sealed class VpnMonitorService(
         // Let StartMonitoringAsync return before the first tick runs.
         await Task.Yield();
 
-        // PeriodicTimer never overlaps ticks: a slow tick delays the next one instead of running alongside it.
-        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(Settings.UpdateDelay), timeProvider);
+        // Ticks run one after another, so a slow tick delays the next one instead of running alongside it.
         try
         {
-            do
+            while (true)
             {
                 await TickAsync(cancellationToken);
-
-                // Pick up an UpdateDelay changed by /bot reload.
-                timer.Period = TimeSpan.FromSeconds(Settings.UpdateDelay);
+                await WaitForNextUpdateAsync(cancellationToken);
             }
-            while (await timer.WaitForNextTickAsync(cancellationToken));
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             // Stopped.
+        }
+    }
+
+    /// <summary>Waits UpdateDelay seconds (read fresh each time), or less if a refresh is requested.</summary>
+    private async Task WaitForNextUpdateAsync(CancellationToken cancellationToken)
+    {
+        using var waitCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var delay = Task.Delay(TimeSpan.FromSeconds(Settings.UpdateDelay), timeProvider, waitCts.Token);
+        var refresh = _refreshSignal.WaitAsync(waitCts.Token);
+
+        await Task.WhenAny(delay, refresh);
+        await waitCts.CancelAsync();
+        cancellationToken.ThrowIfCancellationRequested();
+    }
+
+    private void RequestRefresh()
+    {
+        try
+        {
+            _refreshSignal.Release();
+        }
+        catch (SemaphoreFullException)
+        {
+            // A refresh is already pending.
         }
     }
 

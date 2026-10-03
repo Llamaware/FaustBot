@@ -1,14 +1,17 @@
 using System.Text;
 using Discord;
 using Discord.Interactions;
+using FaustBot.Options;
 using FaustBot.Services;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Hosting.Systemd;
+using Microsoft.Extensions.Logging;
 
 namespace FaustBot.Modules;
 
 [Group("bot", "Bot controls.")]
-public sealed class BotCommands(IHostApplicationLifetime lifetime, ConfigReloader reloader) : InteractionModuleBase<SocketInteractionContext>
+public sealed class BotCommands(IHostApplicationLifetime lifetime, ConfigReloader reloader, ILogger<BotCommands> logger)
+    : InteractionModuleBase<SocketInteractionContext>
 {
     [SlashCommand("ping", "Check that the bot is responding.")]
     public async Task Ping()
@@ -31,9 +34,13 @@ public sealed class BotCommands(IHostApplicationLifetime lifetime, ConfigReloade
                 reply.Append("- ").Append(error).Append('\n');
             }
         }
+        else if (result.Changed.Count == 0)
+        {
+            reply.Append($"No changes found in {Path.Combine(AppContext.BaseDirectory, BotOptions.FileName)}.");
+        }
         else
         {
-            reply.Append("config.json reloaded.");
+            reply.Append($"config.json reloaded. Changed: {string.Join(", ", result.Changed)}.");
             if (result.RestartRequired.Count > 0)
             {
                 reply.Append($" {string.Join(" and ", result.RestartRequired)} changed, which needs `/bot restart` to take effect.");
@@ -60,7 +67,8 @@ public sealed class BotCommands(IHostApplicationLifetime lifetime, ConfigReloade
             return;
         }
 
-        await RespondAsync("Restarting...", ephemeral: true);
+        logger.LogInformation("Restart requested by {User} ({UserId}).", Context.User.Username, Context.User.Id);
+        await RespondAsync("Restarting...");
         Environment.ExitCode = ExitCodes.Restart;
         lifetime.StopApplication();
     }
@@ -69,7 +77,8 @@ public sealed class BotCommands(IHostApplicationLifetime lifetime, ConfigReloade
     [SlashCommand("shutdown", "Shut down the bot. It stays off until started again on the server.")]
     public async Task Shutdown()
     {
-        await RespondAsync("Shutting down.", ephemeral: true);
+        logger.LogInformation("Shutdown requested by {User} ({UserId}).", Context.User.Username, Context.User.Id);
+        await RespondAsync("Shutting down.");
         lifetime.StopApplication();
     }
 }

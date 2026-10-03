@@ -1,3 +1,5 @@
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using FaustBot.Options;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Options;
@@ -5,14 +7,19 @@ using Microsoft.Extensions.Options;
 namespace FaustBot.Services;
 
 /// <param name="Errors">Why the new config was rejected. Empty if it was applied.</param>
+/// <param name="Changed">Names of the settings that differ from the running config.</param>
 /// <param name="RestartRequired">Settings that changed but only take effect after a restart.</param>
-public sealed record ReloadResult(IReadOnlyList<string> Errors, IReadOnlyList<string> RestartRequired);
+public sealed record ReloadResult(IReadOnlyList<string> Errors, IReadOnlyList<string> Changed, IReadOnlyList<string> RestartRequired)
+{
+    public static ReloadResult Failed(IReadOnlyList<string> errors) => new(errors, [], []);
+}
 
 /// <summary>Re-reads config.json at runtime. The new file is validated first, so a bad edit is reported
 /// instead of being applied.</summary>
 public sealed class ConfigReloader(
     IConfiguration configuration,
     IOptions<BotOptions> startupOptions,
+    IOptionsMonitor<BotOptions> currentOptions,
     IEnumerable<IPostConfigureOptions<BotOptions>> postConfigures,
     IEnumerable<IValidateOptions<BotOptions>> validators)
 {
@@ -26,7 +33,7 @@ public sealed class ConfigReloader(
         catch (Exception ex) when (ex is FileNotFoundException or InvalidDataException or FormatException or InvalidOperationException)
         {
             // Missing file, malformed JSON, or a value that can't be converted (e.g. a non-numeric GuildId).
-            return new ReloadResult([ex.Message], []);
+            return ReloadResult.Failed([ex.Message]);
         }
 
         var errors = validators
@@ -36,7 +43,13 @@ public sealed class ConfigReloader(
             .ToList();
         if (errors.Count > 0)
         {
-            return new ReloadResult(errors, []);
+            return ReloadResult.Failed(errors);
+        }
+
+        var changed = GetChangedSettings(currentOptions.CurrentValue, candidate);
+        if (changed.Count == 0)
+        {
+            return new ReloadResult([], [], []);
         }
 
         // Token and GuildId are only read at startup (login and command registration).
@@ -53,7 +66,20 @@ public sealed class ConfigReloader(
 
         // Reloading the host's configuration makes IOptionsMonitor<BotOptions> pick up the new values.
         ((IConfigurationRoot)configuration).Reload();
-        return new ReloadResult([], restartRequired);
+        return new ReloadResult([], changed, restartRequired);
+    }
+
+    /// <summary>Compares settings by their JSON form, which also covers lists like Hubs.</summary>
+    private static List<string> GetChangedSettings(BotOptions current, BotOptions candidate)
+    {
+        var before = JsonSerializer.SerializeToNode(current)!.AsObject();
+        var after = JsonSerializer.SerializeToNode(candidate)!.AsObject();
+
+        return after
+            .Where(p => p.Key != nameof(BotOptions.UsesLegacyHubFormat)
+                && !JsonNode.DeepEquals(p.Value, before[p.Key]))
+            .Select(p => p.Key)
+            .ToList();
     }
 
     private BotOptions LoadCandidate()
