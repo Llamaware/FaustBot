@@ -48,6 +48,7 @@ builder.Services.AddSingleton(sp => new InteractionService(sp.GetRequiredService
 builder.Services.AddSingleton<CommandHandler>();
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<StateStore>();
+builder.Services.AddSingleton<AdminService>();
 builder.Services.AddSingleton<VpnServerClient>();
 builder.Services.AddSingleton<StatusEmbedBuilder>();
 builder.Services.AddSingleton<VpnMonitorService>();

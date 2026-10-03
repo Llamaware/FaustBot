@@ -11,6 +11,9 @@ public sealed class BotState
 
     /// <summary>Set by the stop command so monitoring stays off across restarts until started again.</summary>
     public bool MonitoringPaused { get; set; }
+
+    /// <summary>Admins added at runtime with /admin add.</summary>
+    public List<ulong> AdminUserIds { get; set; } = [];
 }
 
 public sealed class StateStore(ILogger<StateStore> logger)

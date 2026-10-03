@@ -9,7 +9,7 @@ public sealed class VpnMonitor(VpnMonitorService monitor, VpnServerClient vpn) :
 {
     private const string UnreachableMessage = "Can't reach the VPN server right now.";
 
-    [RequireOwner]
+    [RequireBotAdmin]
     [SlashCommand("start", "Start VPN monitoring service.")]
     public async Task Start()
     {
@@ -17,7 +17,7 @@ public sealed class VpnMonitor(VpnMonitorService monitor, VpnServerClient vpn) :
         await RespondAsync(started ? "VPN monitoring service started." : "VPN monitoring service is already running.");
     }
 
-    [RequireOwner]
+    [RequireBotAdmin]
     [SlashCommand("stop", "Stop VPN monitoring service.")]
     public async Task Stop()
     {

@@ -5,7 +5,7 @@ namespace FaustBot.Modules;
 
 public sealed class Admin(IHostApplicationLifetime lifetime) : InteractionModuleBase<SocketInteractionContext>
 {
-    [RequireOwner]
+    [RequireBotAdmin]
     [SlashCommand("shutdown", "Shut down the bot.")]
     public async Task Shutdown()
     {

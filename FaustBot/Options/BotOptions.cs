@@ -9,6 +9,12 @@ public sealed class BotOptions
     public ulong EmbedChannelId { get; set; }
     public bool EnableLogs { get; set; }
 
+    /// <summary>Users who can control the bot, in addition to the bot owner and admins added with /admin add.</summary>
+    public List<ulong> AdminUserIds { get; set; } = [];
+
+    /// <summary>Members with any of these roles can control the bot.</summary>
+    public List<ulong> AdminRoleIds { get; set; } = [];
+
     /// <summary>Start VPN monitoring when the bot connects, without waiting for the start command.</summary>
     public bool AutoStartMonitoring { get; set; } = true;
 
