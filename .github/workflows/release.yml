@@ -46,4 +46,4 @@ jobs:
           if [[ "$GITHUB_REF_NAME" == *-* ]]; then prerelease="--prerelease"; fi
           gh release create "$GITHUB_REF_NAME" \
             faustbot-linux-x64.tar.gz faustbot-linux-x64.tar.gz.sha256 \
-            --title "FaustBot $VERSION" --generate-notes $prerelease
+            --generate-notes $prerelease
