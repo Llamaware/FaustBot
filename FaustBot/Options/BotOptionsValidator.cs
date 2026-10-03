@@ -47,6 +47,11 @@ public sealed class BotOptionsValidator : IValidateOptions<BotOptions>
 
         ValidateHubs(options, errors);
 
+        if (options.MaxPlayersPerHub < 0)
+        {
+            errors.Add("MaxPlayersPerHub can't be negative.");
+        }
+
         if (!TimeZoneInfo.TryFindSystemTimeZoneById(options.TimeZone, out _))
         {
             errors.Add($"TimeZone '{options.TimeZone}' was not found on this system.");

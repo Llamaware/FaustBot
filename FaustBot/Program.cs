@@ -4,6 +4,7 @@ using Discord.WebSocket;
 using FaustBot;
 using FaustBot.Options;
 using FaustBot.Services;
+using FaustBot.Vpn;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -44,7 +45,14 @@ builder.Services.AddSingleton(new DiscordSocketConfig
 builder.Services.AddSingleton<DiscordSocketClient>();
 builder.Services.AddSingleton(sp => new InteractionService(sp.GetRequiredService<DiscordSocketClient>()));
 builder.Services.AddSingleton<CommandHandler>();
+builder.Services.AddSingleton(TimeProvider.System);
+builder.Services.AddSingleton<VpnServerClient>();
+builder.Services.AddSingleton<StatusEmbedBuilder>();
+builder.Services.AddSingleton<VpnMonitorService>();
+
+// Hosted services stop in reverse order, so the monitor stops before the Discord client disconnects.
 builder.Services.AddHostedService<BotHostedService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<VpnMonitorService>());
 
 using var host = builder.Build();
 var logger = host.Services.GetRequiredService<ILogger<Program>>();

@@ -33,6 +33,10 @@ public sealed class BotOptions
     public string TerminalName { get; set; } = "";
     public string TimeZone { get; set; } = "UTC";
     public bool DisplaySessionTime { get; set; } = true;
+
+    /// <summary>Shown as "n/MaxPlayersPerHub Players" on each hub. 0 shows just the count.</summary>
+    public int MaxPlayersPerHub { get; set; } = 4;
+
     public string TitleText { get; set; } = "VPN Status";
     public string FooterText { get; set; } = "";
     public bool MentionUserIds { get; set; }
