@@ -9,6 +9,9 @@ public sealed class BotOptions
     public ulong EmbedChannelId { get; set; }
     public bool EnableLogs { get; set; }
 
+    /// <summary>Start VPN monitoring when the bot connects, without waiting for the start command.</summary>
+    public bool AutoStartMonitoring { get; set; } = true;
+
     /// <summary>Seconds between embed updates.</summary>
     public int UpdateDelay { get; set; } = 60;
 

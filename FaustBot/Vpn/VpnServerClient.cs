@@ -42,7 +42,21 @@ public sealed class VpnServerClient
         return await Task.WhenAll(_options.Hubs.Select(hub => QueryHubAsync(hub, cancellationToken)));
     }
 
+    /// <summary>Queries one hub. Connection and RPC errors are returned as <see cref="HubStatus.Unreachable"/>.</summary>
     public async Task<HubSnapshot> QueryHubAsync(HubOptions hub, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await QueryHubCoreAsync(hub, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            // The generated RPC client throws plain Exceptions for HTTP errors, so there's no narrower type to catch.
+            return HubSnapshot.Unreachable(hub.Name, ex.Message);
+        }
+    }
+
+    private async Task<HubSnapshot> QueryHubCoreAsync(HubOptions hub, CancellationToken cancellationToken)
     {
         var rpc = _serverRpc ?? _hubRpcs[hub.Name];
 
@@ -51,7 +65,7 @@ public sealed class VpnServerClient
             .WaitAsync(cancellationToken);
         if (!status.Online_bool)
         {
-            return new HubSnapshot(hub.Name, Online: false, [], HasTerminal: false);
+            return new HubSnapshot(hub.Name, HubStatus.Offline, [], HasTerminal: false);
         }
 
         var enumSession = await rpc.EnumSessionAsync(new VpnRpcEnumSession { HubName_str = hub.Name })
@@ -69,7 +83,7 @@ public sealed class VpnServerClient
         var hasTerminal = !string.IsNullOrEmpty(_options.TerminalName)
             && allSessions.Any(s => string.Equals(s.Username_str, _options.TerminalName, StringComparison.OrdinalIgnoreCase));
 
-        return new HubSnapshot(hub.Name, Online: true, sessions, hasTerminal);
+        return new HubSnapshot(hub.Name, HubStatus.Online, sessions, hasTerminal);
     }
 
     private static DateTime AsUtc(DateTime value) => value.Kind switch

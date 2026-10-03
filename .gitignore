@@ -364,4 +364,5 @@ FodyWeavers.xsd
 # FaustBot
 config.json
 state.json
+state.json.tmp
 !FaustBot/Properties/PublishProfiles/linux-x64.pubxml

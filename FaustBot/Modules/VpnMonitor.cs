@@ -7,6 +7,8 @@ namespace FaustBot.Modules;
 
 public sealed class VpnMonitor(VpnMonitorService monitor, VpnServerClient vpn) : InteractionModuleBase<SocketInteractionContext>
 {
+    private const string UnreachableMessage = "Can't reach the VPN server right now.";
+
     [RequireOwner]
     [SlashCommand("start", "Start VPN monitoring service.")]
     public async Task Start()
@@ -38,6 +40,11 @@ public sealed class VpnMonitor(VpnMonitorService monitor, VpnServerClient vpn) :
 
         await DeferAsync();
         var snapshot = await vpn.QueryHubAsync(hub, CancellationToken.None);
+        if (snapshot.Status == HubStatus.Unreachable)
+        {
+            await FollowupAsync(UnreachableMessage);
+            return;
+        }
 
         var output = snapshot.Sessions.Count == 0
             ? $"No users are currently connected to {snapshot.Name}."
@@ -64,6 +71,11 @@ public sealed class VpnMonitor(VpnMonitorService monitor, VpnServerClient vpn) :
 
         await DeferAsync();
         var snapshot = await vpn.QueryHubAsync(hub, CancellationToken.None);
-        await FollowupAsync($"The {snapshot.Name} hub is currently {(snapshot.Online ? "online" : "offline")}.");
+        await FollowupAsync(snapshot.Status switch
+        {
+            HubStatus.Online => $"The {snapshot.Name} hub is currently online.",
+            HubStatus.Offline => $"The {snapshot.Name} hub is currently offline.",
+            _ => UnreachableMessage,
+        });
     }
 }

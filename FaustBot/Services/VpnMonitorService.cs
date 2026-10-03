@@ -3,6 +3,7 @@ using System.Net;
 using Discord;
 using Discord.WebSocket;
 using FaustBot.Options;
+using FaustBot.State;
 using FaustBot.Vpn;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -15,11 +16,17 @@ public sealed class VpnMonitorService(
     DiscordSocketClient client,
     VpnServerClient vpn,
     StatusEmbedBuilder embedBuilder,
+    StateStore state,
     IOptions<BotOptions> options,
     TimeProvider timeProvider,
     ILogger<VpnMonitorService> logger) : IHostedService
 {
     private const string TimeFormat = "dddd, MMMM dd, h:mm:ss tt";
+    private const string PausedNotice = "⏸️ VPN monitoring is paused. Use `/start` to resume.";
+    private const string OfflineNotice = "🔴 The bot is offline. This message will update when it's back.";
+
+    // How far back to look for an embed to reuse when state.json doesn't have one.
+    private const int AdoptSearchLimit = 20;
 
     private readonly BotOptions _options = options.Value;
     private readonly TimeZoneInfo _timeZone = TimeZoneInfo.FindSystemTimeZoneById(options.Value.TimeZone);
@@ -27,8 +34,12 @@ public sealed class VpnMonitorService(
 
     private CancellationTokenSource? _loopCts;
     private Task? _loopTask;
-    private IReadOnlyList<HubSnapshot>? _previousHubs;
-    private ulong? _embedMessageId;
+    private bool _autoStartHandled;
+
+    // Last snapshot of each hub that answered, for join/leave logs.
+    private readonly Dictionary<string, HubSnapshot> _lastKnownHubs = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _unreachableHubs = new(StringComparer.OrdinalIgnoreCase);
+    private DateTimeOffset? _serverUnreachableSince;
 
     public bool IsRunning => _loopTask is { IsCompleted: false };
 
@@ -44,7 +55,7 @@ public sealed class VpnMonitorService(
             }
 
             logger.LogInformation("Starting VPN monitoring service.");
-            _previousHubs = null;
+            _lastKnownHubs.Clear();
             _loopCts = new CancellationTokenSource();
             _loopTask = RunLoopAsync(_loopCts.Token);
             return true;
@@ -55,7 +66,7 @@ public sealed class VpnMonitorService(
         }
     }
 
-    /// <summary>Stops monitoring and removes the status embed. Returns false if it wasn't running.</summary>
+    /// <summary>Stops monitoring and marks the embed as paused. Returns false if it wasn't running.</summary>
     public async Task<bool> StopMonitoringAsync()
     {
         await _stateLock.WaitAsync();
@@ -66,7 +77,7 @@ public sealed class VpnMonitorService(
                 return false;
             }
 
-            await DeleteEmbedAsync();
+            await PublishEmbedAsync(embedBuilder.BuildNotice(PausedNotice, timeProvider.GetUtcNow()));
             return true;
         }
         finally
@@ -79,20 +90,49 @@ public sealed class VpnMonitorService(
     public string FormatLocalTime(DateTime utc) =>
         TimeZoneInfo.ConvertTimeFromUtc(utc, _timeZone).ToString(TimeFormat, CultureInfo.InvariantCulture);
 
-    public Task StartAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+    public Task StartAsync(CancellationToken cancellationToken)
+    {
+        client.Ready += OnReadyAsync;
+        return Task.CompletedTask;
+    }
 
     public async Task StopAsync(CancellationToken cancellationToken)
     {
-        // On shutdown the embed is left in place.
         await _stateLock.WaitAsync(cancellationToken);
         try
         {
-            await StopLoopAsync();
+            if (!await StopLoopAsync())
+            {
+                return;
+            }
+
+            // Don't leave live-looking data up while the bot is down. Best effort: shutdown mustn't hang on Discord.
+            try
+            {
+                var embed = embedBuilder.BuildNotice(OfflineNotice, timeProvider.GetUtcNow());
+                await PublishEmbedAsync(embed, new RequestOptions { Timeout = 5000, CancelToken = cancellationToken });
+            }
+            catch (Exception ex) when (ex is Discord.Net.HttpException or TimeoutException or OperationCanceledException)
+            {
+                logger.LogWarning(ex, "Could not mark the status embed as offline.");
+            }
         }
         finally
         {
             _stateLock.Release();
         }
+    }
+
+    private async Task OnReadyAsync()
+    {
+        // Ready fires again after every reconnect; only auto-start on the first one so /stop is respected.
+        if (_autoStartHandled || !_options.AutoStartMonitoring)
+        {
+            return;
+        }
+
+        _autoStartHandled = true;
+        await StartMonitoringAsync();
     }
 
     private async Task<bool> StopLoopAsync()
@@ -137,87 +177,172 @@ public sealed class VpnMonitorService(
         try
         {
             var hubs = await vpn.QueryAllHubsAsync(cancellationToken);
+            TrackReachability(hubs);
 
-            if (_options.EnableLogs && _previousHubs is not null)
+            var changes = CollectUserChanges(hubs);
+            if (_options.EnableLogs && changes.Count > 0)
             {
-                await PostUserChangesAsync(_previousHubs, hubs);
+                await PostUserChangesAsync(changes);
             }
-            _previousHubs = hubs;
 
-            await ReplaceEmbedAsync(hubs);
+            await PublishEmbedAsync(embedBuilder.Build(hubs, timeProvider.GetUtcNow(), _serverUnreachableSince));
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
-            // One failed update (VPN server or Discord unreachable) must not stop the monitor; the next tick retries.
+            // One failed update (e.g. Discord unreachable) must not stop the monitor; the next tick retries.
             logger.LogError(ex, "VPN status update failed.");
         }
     }
 
-    private async Task ReplaceEmbedAsync(IReadOnlyList<HubSnapshot> hubs)
+    /// <summary>Logs when hubs stop or start answering, rather than on every tick.</summary>
+    private void TrackReachability(IReadOnlyList<HubSnapshot> hubs)
     {
-        var channel = await GetTextChannelAsync(_options.EmbedChannelId);
-        var embed = embedBuilder.Build(hubs, timeProvider.GetUtcNow());
+        foreach (var hub in hubs)
+        {
+            if (hub.Status == HubStatus.Unreachable)
+            {
+                if (_unreachableHubs.Add(hub.Name))
+                {
+                    logger.LogWarning("Can't reach hub {Hub}: {Error}", hub.Name, hub.Error);
+                }
+            }
+            else if (_unreachableHubs.Remove(hub.Name))
+            {
+                logger.LogInformation("Hub {Hub} is reachable again.", hub.Name);
+            }
+        }
 
-        await DeleteEmbedAsync();
-        var message = await channel.SendMessageAsync(embed: embed);
-        _embedMessageId = message.Id;
+        var serverUnreachable = hubs.Count > 0 && hubs.All(h => h.Status == HubStatus.Unreachable);
+        if (!serverUnreachable)
+        {
+            _serverUnreachableSince = null;
+        }
+        else
+        {
+            _serverUnreachableSince ??= timeProvider.GetUtcNow();
+        }
     }
 
-    private async Task DeleteEmbedAsync()
-    {
-        if (_embedMessageId is not { } messageId)
-        {
-            return;
-        }
-
-        try
-        {
-            var channel = await GetTextChannelAsync(_options.EmbedChannelId);
-            await channel.DeleteMessageAsync(messageId);
-        }
-        catch (Discord.Net.HttpException ex) when (ex.HttpCode == HttpStatusCode.NotFound)
-        {
-            // Already deleted by someone else.
-        }
-
-        _embedMessageId = null;
-    }
-
-    private async Task PostUserChangesAsync(IReadOnlyList<HubSnapshot> previousHubs, IReadOnlyList<HubSnapshot> currentHubs)
+    /// <summary>Compares each reachable hub to its last known state. Unreachable hubs are skipped, so an
+    /// outage doesn't report everyone as having left.</summary>
+    private List<string> CollectUserChanges(IReadOnlyList<HubSnapshot> hubs)
     {
         List<string> messages = [];
-        foreach (var current in currentHubs)
+        foreach (var current in hubs.Where(h => h.Status != HubStatus.Unreachable))
         {
-            var previous = previousHubs.FirstOrDefault(h => h.Name == current.Name);
-            if (previous is null)
+            if (_lastKnownHubs.TryGetValue(current.Name, out var previous))
             {
-                continue;
+                var previousUsers = previous.Sessions.Select(s => s.Username).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                var currentUsers = current.Sessions.Select(s => s.Username).ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+                foreach (var joined in current.Sessions.Where(s => !previousUsers.Contains(s.Username)))
+                {
+                    messages.Add($"User {FormatUser(joined.Username)} has joined the {current.Name} hub at {FormatLocalTime(joined.CreatedUtc)}.");
+                }
+
+                foreach (var left in previous.Sessions.Where(s => !currentUsers.Contains(s.Username)))
+                {
+                    messages.Add($"User {FormatUser(left.Username)} has left the {current.Name} hub. Last seen at {FormatLocalTime(left.LastCommUtc)}.");
+                }
             }
 
-            var previousUsers = previous.Sessions.ToDictionary(s => s.Username, StringComparer.OrdinalIgnoreCase);
-            var currentUsers = current.Sessions.ToDictionary(s => s.Username, StringComparer.OrdinalIgnoreCase);
-
-            foreach (var joined in current.Sessions.Where(s => !previousUsers.ContainsKey(s.Username)))
-            {
-                messages.Add($"User {FormatUser(joined.Username)} has joined the {current.Name} hub at {FormatLocalTime(joined.CreatedUtc)}.");
-            }
-
-            foreach (var left in previous.Sessions.Where(s => !currentUsers.ContainsKey(s.Username)))
-            {
-                messages.Add($"User {FormatUser(left.Username)} has left the {current.Name} hub. Last seen at {FormatLocalTime(left.LastCommUtc)}.");
-            }
+            _lastKnownHubs[current.Name] = current;
         }
 
-        if (messages.Count == 0)
-        {
-            return;
-        }
+        return messages;
+    }
 
+    private async Task PostUserChangesAsync(List<string> messages)
+    {
         var channel = await GetTextChannelAsync(_options.LogChannelId);
         foreach (var message in messages)
         {
             logger.LogInformation("{Message}", message);
             await channel.SendMessageAsync(message);
+        }
+    }
+
+    /// <summary>Edits the status message in place, or posts a new one if it doesn't exist yet or was deleted.</summary>
+    private async Task PublishEmbedAsync(Embed embed, RequestOptions? requestOptions = null)
+    {
+        var channelId = _options.EmbedChannelId;
+        var channel = await GetTextChannelAsync(channelId);
+        var (savedChannelId, savedMessageId) = await state.ReadAsync(s => (s.EmbedChannelId, s.EmbedMessageId));
+
+        var messageId = savedChannelId == channelId ? savedMessageId : null;
+        if (savedChannelId != channelId && savedChannelId is { } oldChannelId && savedMessageId is { } oldMessageId)
+        {
+            await DeleteOldEmbedAsync(oldChannelId, oldMessageId);
+        }
+
+        messageId ??= await FindExistingEmbedAsync(channel);
+        if (messageId is { } id)
+        {
+            try
+            {
+                await channel.ModifyMessageAsync(id, m => m.Embed = embed, requestOptions);
+                await SaveEmbedLocationAsync(channelId, id);
+                return;
+            }
+            catch (Discord.Net.HttpException ex) when (ex.HttpCode == HttpStatusCode.NotFound)
+            {
+                logger.LogInformation("The status message was deleted; posting a new one.");
+            }
+        }
+
+        var message = await channel.SendMessageAsync(embed: embed, options: requestOptions);
+        await SaveEmbedLocationAsync(channelId, message.Id);
+    }
+
+    private async Task SaveEmbedLocationAsync(ulong channelId, ulong messageId)
+    {
+        var unchanged = await state.ReadAsync(s => s.EmbedChannelId == channelId && s.EmbedMessageId == messageId);
+        if (!unchanged)
+        {
+            await state.UpdateAsync(s =>
+            {
+                s.EmbedChannelId = channelId;
+                s.EmbedMessageId = messageId;
+            });
+        }
+    }
+
+    /// <summary>Finds the bot's newest embed in the channel, e.g. one left by an older version without state.json.</summary>
+    private async Task<ulong?> FindExistingEmbedAsync(IMessageChannel channel)
+    {
+        try
+        {
+            var messages = await channel.GetMessagesAsync(AdoptSearchLimit).FlattenAsync();
+            var existing = messages
+                .Where(m => m.Author.Id == client.CurrentUser.Id && m.Embeds.Count > 0)
+                .MaxBy(m => m.Timestamp);
+            if (existing is not null)
+            {
+                logger.LogInformation("Reusing existing status message {MessageId}.", existing.Id);
+            }
+            return existing?.Id;
+        }
+        catch (Discord.Net.HttpException ex)
+        {
+            // Most likely missing the Read Message History permission; a new message will be posted instead.
+            logger.LogWarning("Could not search the embed channel for an existing status message: {Reason}", ex.Reason);
+            return null;
+        }
+    }
+
+    /// <summary>Removes the status message from a previously configured embed channel.</summary>
+    private async Task DeleteOldEmbedAsync(ulong channelId, ulong messageId)
+    {
+        try
+        {
+            if (await client.GetChannelAsync(channelId) is IMessageChannel oldChannel)
+            {
+                await oldChannel.DeleteMessageAsync(messageId);
+            }
+        }
+        catch (Discord.Net.HttpException ex)
+        {
+            logger.LogWarning("Could not delete the old status message in channel {ChannelId}: {Reason}", channelId, ex.Reason);
         }
     }
 

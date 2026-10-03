@@ -14,16 +14,20 @@ public sealed class StatusEmbedBuilder(IOptions<BotOptions> options)
 
     private readonly BotOptions _options = options.Value;
 
-    public Embed Build(IReadOnlyList<HubSnapshot> hubs, DateTimeOffset now)
+    /// <param name="unreachableSince">When every hub stopped answering, or null if any hub is reachable.</param>
+    public Embed Build(IReadOnlyList<HubSnapshot> hubs, DateTimeOffset now, DateTimeOffset? unreachableSince = null)
     {
-        var embed = new EmbedBuilder()
-            .WithTitle(Truncate(_options.TitleText, EmbedBuilder.MaxTitleLength))
-            .WithColor(Color.Green)
-            .WithTimestamp(now);
+        var embed = CreateBase(now);
 
         if (!string.IsNullOrWhiteSpace(_options.FooterText))
         {
             embed.WithFooter(Truncate(_options.FooterText, EmbedFooterBuilder.MaxFooterTextLength));
+        }
+
+        if (unreachableSince is { } since)
+        {
+            embed.WithDescription(
+                $"⚠️ Can't reach the VPN server (since {TimestampTag.FormatFromDateTimeOffset(since, TimestampTagStyles.Relative)}).");
         }
 
         var fields = hubs.Take(EmbedBuilder.MaxFieldCount)
@@ -44,11 +48,28 @@ public sealed class StatusEmbedBuilder(IOptions<BotOptions> options)
         return embed.Build();
     }
 
+    /// <summary>An embed with no hub data, shown while monitoring is paused or the bot is offline.</summary>
+    public Embed BuildNotice(string message, DateTimeOffset now) =>
+        CreateBase(now).WithDescription(message).Build();
+
+    private EmbedBuilder CreateBase(DateTimeOffset now) => new EmbedBuilder()
+        .WithTitle(Truncate(_options.TitleText, EmbedBuilder.MaxTitleLength))
+        .WithColor(Color.Green)
+        .WithTimestamp(now);
+
     private string BuildFieldName(HubSnapshot hub)
     {
-        var status = _options.CustomEmojis
-            ? (hub.Online ? _options.HubOnlineEmoji : _options.HubOfflineEmoji)
-            : (hub.Online ? "[Online]" : "[Offline]");
+        var status = hub.Status switch
+        {
+            HubStatus.Online => _options.CustomEmojis ? _options.HubOnlineEmoji : "[Online]",
+            HubStatus.Offline => _options.CustomEmojis ? _options.HubOfflineEmoji : "[Offline]",
+            _ => _options.CustomEmojis ? "⚠️" : "[Unreachable]",
+        };
+
+        if (hub.Status == HubStatus.Unreachable)
+        {
+            return $"{status} {hub.Name}";
+        }
 
         var capacity = _options.MaxPlayersPerHub > 0 ? $"/{_options.MaxPlayersPerHub}" : "";
         var name = $"{status} {hub.Name}: {hub.Sessions.Count}{capacity} Players";
@@ -57,9 +78,12 @@ public sealed class StatusEmbedBuilder(IOptions<BotOptions> options)
 
     private string BuildFieldValue(HubSnapshot hub, DateTimeOffset now, int maxLength)
     {
-        if (!hub.Online)
+        switch (hub.Status)
         {
-            return "Hub Offline";
+            case HubStatus.Offline:
+                return "Hub Offline";
+            case HubStatus.Unreachable:
+                return "Status Unknown";
         }
 
         if (hub.Sessions.Count == 0)
