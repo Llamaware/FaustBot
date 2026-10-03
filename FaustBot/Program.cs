@@ -1,3 +1,4 @@
+using System.Reflection;
 using Discord;
 using Discord.Interactions;
 using Discord.WebSocket;
@@ -11,6 +12,15 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+
+var version = typeof(Program).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "unknown";
+
+// Used by update.sh to compare the installed version with the latest release.
+if (args is ["--version"])
+{
+    Console.WriteLine(version);
+    return 0;
+}
 
 var configPath = Path.Combine(AppContext.BaseDirectory, BotOptions.FileName);
 if (!File.Exists(configPath))
@@ -78,6 +88,8 @@ catch (InvalidOperationException ex)
     logger.LogCritical("Invalid {ConfigFile}: {Error}", BotOptions.FileName, ex.Message);
     return ExitCodes.ConfigError;
 }
+
+logger.LogInformation("FaustBot {Version}", version);
 
 if (options.UsesLegacyHubFormat)
 {

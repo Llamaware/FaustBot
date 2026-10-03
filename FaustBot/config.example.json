@@ -1,0 +1,34 @@
+{
+  "Token": "PutYourBotTokenHere",
+  "GuildId": 1234567890,
+  "EmbedChannelId": 1234567890,
+  "LogChannelId": 1234567890,
+  "EnableLogs": false,
+  "AutoStartMonitoring": true,
+  "UpdateDelay": 60,
+
+  "AdminUserIds": [],
+  "AdminRoleIds": [],
+
+  "VpnServerIp": "127.0.0.1",
+  "VpnServerPort": 443,
+  "VpnServerPassword": "PasswordHere",
+  "VirtualHubMode": false,
+  "Hubs": [
+    { "Name": "TEST-A" },
+    { "Name": "TEST-B" },
+    { "Name": "TEST-C", "Password": "OnlyNeededWithVirtualHubMode" }
+  ],
+  "IgnoreList": [ "Local Bridge", "SecureNAT", "MaxiTerm" ],
+  "TerminalName": "MaxiTerm",
+
+  "TimeZone": "Pacific Standard Time",
+  "DisplaySessionTime": true,
+  "MaxPlayersPerHub": 4,
+  "TitleText": "My VPN Network Status\nVPN Location",
+  "FooterText": "VPN Bot will auto-update this message every minute",
+  "MentionUserIds": false,
+  "CustomEmojis": false,
+  "HubOnlineEmoji": "<:emoji_ok:1234567890>",
+  "HubOfflineEmoji": "<:emoji_ng:1234567890>"
+}

@@ -1,0 +1,49 @@
+# Builds the Linux release and publishes it to GitHub Releases when a version tag is pushed:
+#   git tag v3.0.0 && git push origin v3.0.0
+# Tags with a hyphen (e.g. v3.0.0-rc1) are published as pre-releases, which update.sh only installs
+# when asked for by name (./update.sh --version v3.0.0-rc1).
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Determine version
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      - name: Publish
+        run: dotnet publish FaustBot/FaustBot.csproj -p:PublishProfile=linux-x64 -p:Version="$VERSION"
+
+      - name: Package
+        run: |
+          mkdir staging
+          cp FaustBot/bin/Release/publish/linux-x64/FaustBot staging/
+          cp FaustBot/config.example.json staging/
+          cp deploy/install.sh deploy/update.sh deploy/faustbot.service.template staging/
+          echo "$VERSION" > staging/VERSION
+          chmod +x staging/FaustBot staging/install.sh staging/update.sh
+          tar -czf faustbot-linux-x64.tar.gz -C staging .
+          sha256sum faustbot-linux-x64.tar.gz > faustbot-linux-x64.tar.gz.sha256
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prerelease=""
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then prerelease="--prerelease"; fi
+          gh release create "$GITHUB_REF_NAME" \
+            faustbot-linux-x64.tar.gz faustbot-linux-x64.tar.gz.sha256 \
+            --title "FaustBot $VERSION" --generate-notes $prerelease
