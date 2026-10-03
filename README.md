@@ -14,7 +14,7 @@ A Discord bot for monitoring SoftEther VPN hubs.
 
 `/bot ping` - Ping the bot.
 
-`/bot reload` - Re-read `config.json` without restarting. (Admin)
+`/bot reload` - Re-read `config.json` without restarting. (Owner)
 
 `/bot restart` - Restart the bot. Requires systemd. (Admin)
 

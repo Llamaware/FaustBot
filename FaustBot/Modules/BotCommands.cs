@@ -19,7 +19,8 @@ public sealed class BotCommands(IHostApplicationLifetime lifetime, ConfigReloade
         await RespondAsync($"Pong! Gateway latency: {Context.Client.Latency} ms.", ephemeral: true);
     }
 
-    [RequireBotAdmin]
+    // Owner only: config.json lives on the server, and replies can include server file paths.
+    [RequireBotAdmin(ownerOnly: true)]
     [SlashCommand("reload", "Re-read config.json without restarting.")]
     public async Task Reload()
     {
