@@ -55,6 +55,7 @@ public sealed class VpnMonitorService(
             }
 
             logger.LogInformation("Starting VPN monitoring service.");
+            await SetPausedAsync(false);
             _lastKnownHubs.Clear();
             _loopCts = new CancellationTokenSource();
             _loopTask = RunLoopAsync(_loopCts.Token);
@@ -66,7 +67,8 @@ public sealed class VpnMonitorService(
         }
     }
 
-    /// <summary>Stops monitoring and marks the embed as paused. Returns false if it wasn't running.</summary>
+    /// <summary>Stops monitoring until started again, including across restarts, and marks the embed as paused.
+    /// Returns false if it wasn't running.</summary>
     public async Task<bool> StopMonitoringAsync()
     {
         await _stateLock.WaitAsync();
@@ -77,7 +79,8 @@ public sealed class VpnMonitorService(
                 return false;
             }
 
-            await PublishEmbedAsync(embedBuilder.BuildNotice(PausedNotice, timeProvider.GetUtcNow()));
+            await SetPausedAsync(true);
+            await TryPublishNoticeAsync(PausedNotice);
             return true;
         }
         finally
@@ -106,16 +109,8 @@ public sealed class VpnMonitorService(
                 return;
             }
 
-            // Don't leave live-looking data up while the bot is down. Best effort: shutdown mustn't hang on Discord.
-            try
-            {
-                var embed = embedBuilder.BuildNotice(OfflineNotice, timeProvider.GetUtcNow());
-                await PublishEmbedAsync(embed, new RequestOptions { Timeout = 5000, CancelToken = cancellationToken });
-            }
-            catch (Exception ex) when (ex is Discord.Net.HttpException or TimeoutException or OperationCanceledException)
-            {
-                logger.LogWarning(ex, "Could not mark the status embed as offline.");
-            }
+            // Don't leave live-looking data up while the bot is down. Shutdown mustn't hang on Discord.
+            await TryPublishNoticeAsync(OfflineNotice, new RequestOptions { Timeout = 5000, CancelToken = cancellationToken });
         }
         finally
         {
@@ -125,14 +120,42 @@ public sealed class VpnMonitorService(
 
     private async Task OnReadyAsync()
     {
-        // Ready fires again after every reconnect; only auto-start on the first one so /stop is respected.
+        // Ready fires again after every reconnect; only auto-start on the first one.
         if (_autoStartHandled || !_options.AutoStartMonitoring)
         {
             return;
         }
 
         _autoStartHandled = true;
+        if (await state.ReadAsync(s => s.MonitoringPaused))
+        {
+            logger.LogInformation("VPN monitoring was paused with /stop, so it won't auto-start. Use /start to resume.");
+            return;
+        }
+
         await StartMonitoringAsync();
+    }
+
+    /// <summary>Replaces the embed with a notice. Failures are logged, since monitoring has already stopped.</summary>
+    private async Task TryPublishNoticeAsync(string notice, RequestOptions? requestOptions = null)
+    {
+        try
+        {
+            await PublishEmbedAsync(embedBuilder.BuildNotice(notice, timeProvider.GetUtcNow()), requestOptions);
+        }
+        catch (Exception ex) when (ex is Discord.Net.HttpException or TimeoutException
+            or OperationCanceledException or InvalidOperationException)
+        {
+            logger.LogWarning(ex, "Could not update the status embed.");
+        }
+    }
+
+    private async Task SetPausedAsync(bool paused)
+    {
+        if (await state.ReadAsync(s => s.MonitoringPaused) != paused)
+        {
+            await state.UpdateAsync(s => s.MonitoringPaused = paused);
+        }
     }
 
     private async Task<bool> StopLoopAsync()

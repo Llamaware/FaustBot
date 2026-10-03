@@ -8,6 +8,9 @@ public sealed class BotState
 {
     public ulong? EmbedChannelId { get; set; }
     public ulong? EmbedMessageId { get; set; }
+
+    /// <summary>Set by the stop command so monitoring stays off across restarts until started again.</summary>
+    public bool MonitoringPaused { get; set; }
 }
 
 public sealed class StateStore(ILogger<StateStore> logger)
