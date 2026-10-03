@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text;
 using System.Net;
 using Discord;
 using Discord.WebSocket;
@@ -17,19 +18,18 @@ public sealed class VpnMonitorService(
     VpnServerClient vpn,
     StatusEmbedBuilder embedBuilder,
     StateStore state,
-    IOptions<BotOptions> options,
+    IOptionsMonitor<BotOptions> options,
     TimeProvider timeProvider,
     ILogger<VpnMonitorService> logger) : IHostedService
 {
     private const string TimeFormat = "dddd, MMMM dd, h:mm:ss tt";
-    private const string PausedNotice = "⏸️ VPN monitoring is paused. Use `/start` to resume.";
+    private const string PausedNotice = "⏸️ VPN monitoring is paused. Use `/vpn start` to resume.";
     private const string OfflineNotice = "🔴 The bot is offline. This message will update when it's back.";
 
     // How far back to look for an embed to reuse when state.json doesn't have one.
     private const int AdoptSearchLimit = 20;
 
-    private readonly BotOptions _options = options.Value;
-    private readonly TimeZoneInfo _timeZone = TimeZoneInfo.FindSystemTimeZoneById(options.Value.TimeZone);
+    private BotOptions Settings => options.CurrentValue;
     private readonly SemaphoreSlim _stateLock = new(1, 1);
 
     private CancellationTokenSource? _loopCts;
@@ -91,7 +91,8 @@ public sealed class VpnMonitorService(
 
     /// <summary>Formats a UTC time in the configured time zone.</summary>
     public string FormatLocalTime(DateTime utc) =>
-        TimeZoneInfo.ConvertTimeFromUtc(utc, _timeZone).ToString(TimeFormat, CultureInfo.InvariantCulture);
+        TimeZoneInfo.ConvertTimeFromUtc(utc, TimeZoneInfo.FindSystemTimeZoneById(Settings.TimeZone))
+            .ToString(TimeFormat, CultureInfo.InvariantCulture);
 
     public Task StartAsync(CancellationToken cancellationToken)
     {
@@ -121,7 +122,7 @@ public sealed class VpnMonitorService(
     private async Task OnReadyAsync()
     {
         // Ready fires again after every reconnect; only auto-start on the first one.
-        if (_autoStartHandled || !_options.AutoStartMonitoring)
+        if (_autoStartHandled || !Settings.AutoStartMonitoring)
         {
             return;
         }
@@ -129,7 +130,7 @@ public sealed class VpnMonitorService(
         _autoStartHandled = true;
         if (await state.ReadAsync(s => s.MonitoringPaused))
         {
-            logger.LogInformation("VPN monitoring was paused with /stop, so it won't auto-start. Use /start to resume.");
+            logger.LogInformation("VPN monitoring was paused with /vpn stop, so it won't auto-start. Use /vpn start to resume.");
             return;
         }
 
@@ -180,12 +181,15 @@ public sealed class VpnMonitorService(
         await Task.Yield();
 
         // PeriodicTimer never overlaps ticks: a slow tick delays the next one instead of running alongside it.
-        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(_options.UpdateDelay), timeProvider);
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(Settings.UpdateDelay), timeProvider);
         try
         {
             do
             {
                 await TickAsync(cancellationToken);
+
+                // Pick up an UpdateDelay changed by /bot reload.
+                timer.Period = TimeSpan.FromSeconds(Settings.UpdateDelay);
             }
             while (await timer.WaitForNextTickAsync(cancellationToken));
         }
@@ -203,7 +207,7 @@ public sealed class VpnMonitorService(
             TrackReachability(hubs);
 
             var changes = CollectUserChanges(hubs);
-            if (_options.EnableLogs && changes.Count > 0)
+            if (Settings.EnableLogs && changes.Count > 0)
             {
                 await PostUserChangesAsync(changes);
             }
@@ -275,20 +279,38 @@ public sealed class VpnMonitorService(
         return messages;
     }
 
-    private async Task PostUserChangesAsync(List<string> messages)
+    /// <summary>Posts one message per update, split only if it exceeds Discord's message length limit.</summary>
+    private async Task PostUserChangesAsync(List<string> lines)
     {
-        var channel = await GetTextChannelAsync(_options.LogChannelId);
-        foreach (var message in messages)
+        foreach (var line in lines)
         {
-            logger.LogInformation("{Message}", message);
-            await channel.SendMessageAsync(message);
+            logger.LogInformation("{Message}", line);
         }
+
+        var channel = await GetTextChannelAsync(Settings.LogChannelId);
+        var message = new StringBuilder();
+        foreach (var line in lines)
+        {
+            if (message.Length > 0 && message.Length + 1 + line.Length > DiscordConfig.MaxMessageSize)
+            {
+                await channel.SendMessageAsync(message.ToString(), allowedMentions: AllowedMentions.None);
+                message.Clear();
+            }
+
+            if (message.Length > 0)
+            {
+                message.Append('\n');
+            }
+            message.Append(line);
+        }
+
+        await channel.SendMessageAsync(message.ToString(), allowedMentions: AllowedMentions.None);
     }
 
     /// <summary>Edits the status message in place, or posts a new one if it doesn't exist yet or was deleted.</summary>
     private async Task PublishEmbedAsync(Embed embed, RequestOptions? requestOptions = null)
     {
-        var channelId = _options.EmbedChannelId;
+        var channelId = Settings.EmbedChannelId;
         var channel = await GetTextChannelAsync(channelId);
         var (savedChannelId, savedMessageId) = await state.ReadAsync(s => (s.EmbedChannelId, s.EmbedMessageId));
 
@@ -369,7 +391,7 @@ public sealed class VpnMonitorService(
         }
     }
 
-    private string FormatUser(string username) => _options.MentionUserIds ? $"<@{username}>" : username;
+    private string FormatUser(string username) => Settings.MentionUserIds ? $"<@{username}>" : username;
 
     private async Task<IMessageChannel> GetTextChannelAsync(ulong channelId)
     {

@@ -38,8 +38,10 @@ public sealed class CommandHandler(
 
     private async Task OnInteractionExecutedAsync(ICommandInfo command, IInteractionContext context, IResult result)
     {
-        // UnknownCommand: not one of ours, so stay silent.
-        if (result.IsSuccess || result.Error == InteractionCommandError.UnknownCommand)
+        // UnknownCommand: not one of ours, so stay silent. Autocomplete requests can't be answered with a message.
+        if (result.IsSuccess
+            || result.Error == InteractionCommandError.UnknownCommand
+            || context.Interaction is IAutocompleteInteraction)
         {
             return;
         }

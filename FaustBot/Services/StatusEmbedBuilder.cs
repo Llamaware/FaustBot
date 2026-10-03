@@ -8,20 +8,20 @@ using Microsoft.Extensions.Options;
 namespace FaustBot.Services;
 
 /// <summary>Builds the persistent status embed, keeping within Discord's embed limits.</summary>
-public sealed class StatusEmbedBuilder(IOptions<BotOptions> options)
+public sealed class StatusEmbedBuilder(IOptionsMonitor<BotOptions> options)
 {
     private const string TerminalBadge = " :regional_indicator_d::regional_indicator_t:";
 
-    private readonly BotOptions _options = options.Value;
+    private BotOptions Settings => options.CurrentValue;
 
     /// <param name="unreachableSince">When every hub stopped answering, or null if any hub is reachable.</param>
     public Embed Build(IReadOnlyList<HubSnapshot> hubs, DateTimeOffset now, DateTimeOffset? unreachableSince = null)
     {
         var embed = CreateBase(now);
 
-        if (!string.IsNullOrWhiteSpace(_options.FooterText))
+        if (!string.IsNullOrWhiteSpace(Settings.FooterText))
         {
-            embed.WithFooter(Truncate(_options.FooterText, EmbedFooterBuilder.MaxFooterTextLength));
+            embed.WithFooter(Truncate(Settings.FooterText, EmbedFooterBuilder.MaxFooterTextLength));
         }
 
         if (unreachableSince is { } since)
@@ -53,7 +53,7 @@ public sealed class StatusEmbedBuilder(IOptions<BotOptions> options)
         CreateBase(now).WithDescription(message).Build();
 
     private EmbedBuilder CreateBase(DateTimeOffset now) => new EmbedBuilder()
-        .WithTitle(Truncate(_options.TitleText, EmbedBuilder.MaxTitleLength))
+        .WithTitle(Truncate(Settings.TitleText, EmbedBuilder.MaxTitleLength))
         .WithColor(Color.Green)
         .WithTimestamp(now);
 
@@ -61,9 +61,9 @@ public sealed class StatusEmbedBuilder(IOptions<BotOptions> options)
     {
         var status = hub.Status switch
         {
-            HubStatus.Online => _options.CustomEmojis ? _options.HubOnlineEmoji : "[Online]",
-            HubStatus.Offline => _options.CustomEmojis ? _options.HubOfflineEmoji : "[Offline]",
-            _ => _options.CustomEmojis ? "⚠️" : "[Unreachable]",
+            HubStatus.Online => Settings.CustomEmojis ? Settings.HubOnlineEmoji : "[Online]",
+            HubStatus.Offline => Settings.CustomEmojis ? Settings.HubOfflineEmoji : "[Offline]",
+            _ => Settings.CustomEmojis ? "⚠️" : "[Unreachable]",
         };
 
         if (hub.Status == HubStatus.Unreachable)
@@ -71,7 +71,7 @@ public sealed class StatusEmbedBuilder(IOptions<BotOptions> options)
             return $"{status} {hub.Name}";
         }
 
-        var capacity = _options.MaxPlayersPerHub > 0 ? $"/{_options.MaxPlayersPerHub}" : "";
+        var capacity = Settings.MaxPlayersPerHub > 0 ? $"/{Settings.MaxPlayersPerHub}" : "";
         var name = $"{status} {hub.Name}: {hub.Sessions.Count}{capacity} Players";
         return hub.HasTerminal ? name + TerminalBadge : name;
     }
@@ -113,8 +113,8 @@ public sealed class StatusEmbedBuilder(IOptions<BotOptions> options)
 
     private string FormatSession(VpnSession session, DateTimeOffset now)
     {
-        var name = _options.MentionUserIds ? $"<@{session.Username}>" : session.Username;
-        if (!_options.DisplaySessionTime)
+        var name = Settings.MentionUserIds ? $"<@{session.Username}>" : session.Username;
+        if (!Settings.DisplaySessionTime)
         {
             return name;
         }

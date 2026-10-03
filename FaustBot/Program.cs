@@ -12,12 +12,10 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
-const string ConfigFileName = "config.json";
-
-var configPath = Path.Combine(AppContext.BaseDirectory, ConfigFileName);
+var configPath = Path.Combine(AppContext.BaseDirectory, BotOptions.FileName);
 if (!File.Exists(configPath))
 {
-    Console.Error.WriteLine($"{ConfigFileName} not found at {configPath}. Copy config.example.json to {ConfigFileName} and fill it in.");
+    Console.Error.WriteLine($"{BotOptions.FileName} not found at {configPath}. Copy config.example.json to {BotOptions.FileName} and fill it in.");
     return ExitCodes.ConfigError;
 }
 
@@ -28,7 +26,7 @@ var builder = Host.CreateApplicationBuilder(new HostApplicationBuilderSettings
 });
 
 builder.Configuration
-    .AddJsonFile(ConfigFileName, optional: false, reloadOnChange: false)
+    .AddJsonFile(BotOptions.FileName, optional: false, reloadOnChange: false)
     .AddEnvironmentVariables("FAUSTBOT_");
 
 // Uses journald log formatting and sd_notify readiness when running under systemd; no-op otherwise.
@@ -49,6 +47,7 @@ builder.Services.AddSingleton<CommandHandler>();
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<StateStore>();
 builder.Services.AddSingleton<AdminService>();
+builder.Services.AddSingleton<ConfigReloader>();
 builder.Services.AddSingleton<VpnServerClient>();
 builder.Services.AddSingleton<StatusEmbedBuilder>();
 builder.Services.AddSingleton<VpnMonitorService>();
@@ -69,14 +68,14 @@ catch (OptionsValidationException ex)
 {
     foreach (var failure in ex.Failures)
     {
-        logger.LogCritical("Invalid {ConfigFile}: {Failure}", ConfigFileName, failure);
+        logger.LogCritical("Invalid {ConfigFile}: {Failure}", BotOptions.FileName, failure);
     }
     return ExitCodes.ConfigError;
 }
 catch (InvalidOperationException ex)
 {
     // Thrown by the configuration binder when a value can't be converted, e.g. a non-numeric GuildId.
-    logger.LogCritical("Invalid {ConfigFile}: {Error}", ConfigFileName, ex.Message);
+    logger.LogCritical("Invalid {ConfigFile}: {Error}", BotOptions.FileName, ex.Message);
     return ExitCodes.ConfigError;
 }
 

@@ -8,7 +8,7 @@ using Microsoft.Extensions.Options;
 namespace FaustBot.Modules;
 
 [Group("admin", "Manage who can control the bot.")]
-public sealed class AdminCommands(AdminService admins, IOptions<BotOptions> options) : InteractionModuleBase<SocketInteractionContext>
+public sealed class AdminCommands(AdminService admins, IOptionsMonitor<BotOptions> options) : InteractionModuleBase<SocketInteractionContext>
 {
     [RequireBotAdmin(ownerOnly: true)]
     [SlashCommand("add", "Let a user control the bot.")]
@@ -42,7 +42,7 @@ public sealed class AdminCommands(AdminService admins, IOptions<BotOptions> opti
     [SlashCommand("list", "Show who can control the bot.")]
     public async Task List()
     {
-        var config = options.Value;
+        var config = options.CurrentValue;
         var text = new StringBuilder();
         AppendSection(text, "Owner", (await admins.GetOwnerIdsAsync()).Select(MentionUtils.MentionUser));
         AppendSection(text, "Admins (config.json)", config.AdminUserIds.Select(MentionUtils.MentionUser));

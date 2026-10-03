@@ -4,50 +4,42 @@ using SoftEther.VPNServerRpc;
 
 namespace FaustBot.Vpn;
 
-/// <summary>Queries the SoftEther server. RPC clients are created once and reused for every request.</summary>
-public sealed class VpnServerClient
+/// <summary>Queries the SoftEther server. RPC clients are created once and reused until the config is reloaded.</summary>
+public sealed class VpnServerClient : IDisposable
 {
-    private readonly BotOptions _options;
-    private readonly HashSet<string> _ignoreList;
+    private readonly IDisposable? _changeSubscription;
 
-    // Server admin mode shares one client; virtual hub mode needs one per hub, since each has its own password.
-    private readonly VpnServerRpc? _serverRpc;
-    private readonly Dictionary<string, VpnServerRpc> _hubRpcs = new(StringComparer.OrdinalIgnoreCase);
+    // Replaced as a whole on reload, so a query always sees one consistent set of settings and clients.
+    private volatile Connection _connection;
 
-    public VpnServerClient(IOptions<BotOptions> options)
+    public VpnServerClient(IOptionsMonitor<BotOptions> options)
     {
-        _options = options.Value;
-        _ignoreList = new HashSet<string>(_options.IgnoreList, StringComparer.OrdinalIgnoreCase);
-
-        if (_options.VirtualHubMode)
-        {
-            foreach (var hub in _options.Hubs)
-            {
-                _hubRpcs[hub.Name] = new VpnServerRpc(_options.VpnServerIp, _options.VpnServerPort, hub.Password, hub.Name);
-            }
-        }
-        else
-        {
-            _serverRpc = new VpnServerRpc(_options.VpnServerIp, _options.VpnServerPort, _options.VpnServerPassword, "");
-        }
+        _connection = new Connection(options.CurrentValue);
+        _changeSubscription = options.OnChange(updated => _connection = new Connection(updated));
     }
 
-    public IReadOnlyList<HubOptions> Hubs => _options.Hubs;
+    public IReadOnlyList<HubOptions> Hubs => _connection.Options.Hubs;
 
     public HubOptions? FindHub(string name) =>
-        _options.Hubs.FirstOrDefault(h => string.Equals(h.Name, name, StringComparison.OrdinalIgnoreCase));
+        Hubs.FirstOrDefault(h => string.Equals(h.Name, name, StringComparison.OrdinalIgnoreCase));
 
     public async Task<IReadOnlyList<HubSnapshot>> QueryAllHubsAsync(CancellationToken cancellationToken)
     {
-        return await Task.WhenAll(_options.Hubs.Select(hub => QueryHubAsync(hub, cancellationToken)));
+        var connection = _connection;
+        return await Task.WhenAll(connection.Options.Hubs.Select(hub => QueryHubAsync(connection, hub, cancellationToken)));
     }
 
     /// <summary>Queries one hub. Connection and RPC errors are returned as <see cref="HubStatus.Unreachable"/>.</summary>
-    public async Task<HubSnapshot> QueryHubAsync(HubOptions hub, CancellationToken cancellationToken)
+    public Task<HubSnapshot> QueryHubAsync(HubOptions hub, CancellationToken cancellationToken) =>
+        QueryHubAsync(_connection, hub, cancellationToken);
+
+    public void Dispose() => _changeSubscription?.Dispose();
+
+    private static async Task<HubSnapshot> QueryHubAsync(Connection connection, HubOptions hub, CancellationToken cancellationToken)
     {
         try
         {
-            return await QueryHubCoreAsync(hub, cancellationToken);
+            return await QueryHubCoreAsync(connection, hub, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
@@ -56,9 +48,9 @@ public sealed class VpnServerClient
         }
     }
 
-    private async Task<HubSnapshot> QueryHubCoreAsync(HubOptions hub, CancellationToken cancellationToken)
+    private static async Task<HubSnapshot> QueryHubCoreAsync(Connection connection, HubOptions hub, CancellationToken cancellationToken)
     {
-        var rpc = _serverRpc ?? _hubRpcs[hub.Name];
+        var rpc = connection.GetRpc(hub.Name);
 
         // The generated RPC stubs don't take a CancellationToken, so stop waiting instead.
         var status = await rpc.GetHubStatusAsync(new VpnRpcHubStatus { HubName_str = hub.Name })
@@ -74,14 +66,15 @@ public sealed class VpnServerClient
 
         // A user can hold several sessions; keep their oldest one.
         var sessions = allSessions
-            .Where(s => !string.IsNullOrEmpty(s.Username_str) && !_ignoreList.Contains(s.Username_str))
+            .Where(s => !string.IsNullOrEmpty(s.Username_str) && !connection.IgnoreList.Contains(s.Username_str))
             .GroupBy(s => s.Username_str, StringComparer.OrdinalIgnoreCase)
             .Select(g => g.MinBy(s => s.CreatedTime_dt)!)
             .Select(s => new VpnSession(s.Username_str, AsUtc(s.CreatedTime_dt), AsUtc(s.LastCommTime_dt)))
             .ToList();
 
-        var hasTerminal = !string.IsNullOrEmpty(_options.TerminalName)
-            && allSessions.Any(s => string.Equals(s.Username_str, _options.TerminalName, StringComparison.OrdinalIgnoreCase));
+        var terminalName = connection.Options.TerminalName;
+        var hasTerminal = !string.IsNullOrEmpty(terminalName)
+            && allSessions.Any(s => string.Equals(s.Username_str, terminalName, StringComparison.OrdinalIgnoreCase));
 
         return new HubSnapshot(hub.Name, HubStatus.Online, sessions, hasTerminal);
     }
@@ -92,4 +85,34 @@ public sealed class VpnServerClient
         DateTimeKind.Local => value.ToUniversalTime(),
         _ => DateTime.SpecifyKind(value, DateTimeKind.Utc),
     };
+
+    private sealed class Connection
+    {
+        // Server admin mode shares one client; virtual hub mode needs one per hub, since each has its own password.
+        private readonly VpnServerRpc? _serverRpc;
+        private readonly Dictionary<string, VpnServerRpc> _hubRpcs = new(StringComparer.OrdinalIgnoreCase);
+
+        public Connection(BotOptions options)
+        {
+            Options = options;
+            IgnoreList = new HashSet<string>(options.IgnoreList, StringComparer.OrdinalIgnoreCase);
+
+            if (options.VirtualHubMode)
+            {
+                foreach (var hub in options.Hubs)
+                {
+                    _hubRpcs[hub.Name] = new VpnServerRpc(options.VpnServerIp, options.VpnServerPort, hub.Password, hub.Name);
+                }
+            }
+            else
+            {
+                _serverRpc = new VpnServerRpc(options.VpnServerIp, options.VpnServerPort, options.VpnServerPassword, "");
+            }
+        }
+
+        public BotOptions Options { get; }
+        public HashSet<string> IgnoreList { get; }
+
+        public VpnServerRpc GetRpc(string hubName) => _serverRpc ?? _hubRpcs[hubName];
+    }
 }

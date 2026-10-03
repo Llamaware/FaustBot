@@ -3,6 +3,8 @@ namespace FaustBot.Options;
 /// <summary>Settings bound from config.json (and FAUSTBOT_* environment variables).</summary>
 public sealed class BotOptions
 {
+    public const string FileName = "config.json";
+
     public string Token { get; set; } = "";
     public ulong GuildId { get; set; }
     public ulong LogChannelId { get; set; }
